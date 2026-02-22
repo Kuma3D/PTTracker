@@ -88,14 +88,14 @@ PocketTavern's Kotlin layer (`JsExtensionHost.applyOutputFilters`) uses this reg
 
 ## Quick-Reply Buttons
 
-PTTracker registers two convenience buttons:
+PTTracker registers two inline buttons inside each message header, shown when you long-press the header:
 
 | Button | Action |
 |--------|--------|
-| ✏️ Edit Tracker | Sends an empty message — tap this as a reminder to open extension settings and edit tracker values manually |
-| 🔄 Regenerate Tracker | Sends an OOC instruction asking the AI to reassess and re-output its tracker tags for the current scene |
+| ✏️ Edit | Opens a dialog to manually edit the tracker values for that message |
+| 🔄 Regenerate | Sends a hidden OOC prompt asking the AI to reassess and re-output tracker tags for that message |
 
-During generation the buttons are replaced with a ⏹ **Stop** button and restored when generation ends.
+The buttons are toggled visible/hidden automatically by PocketTavern on long-press — no separate Hide button is needed.
 
 ---
 
