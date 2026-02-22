@@ -34,9 +34,6 @@
     /** Stores tracker state per message index: { [messageIndex]: { currentTime, currentLocation, currentWeather, heartPoints } } */
     var _perMessageTracker = {};
 
-    /** Tracks which message headers currently have their action buttons showing. */
-    var _headerButtonsVisible = {};
-
     /**
      * Default settings applied the first time the extension loads
      * (or when a key is missing from persisted settings).
@@ -290,36 +287,6 @@
     }
 
     // -------------------------------------------------------------------------
-    // Quick-reply buttons
-    // -------------------------------------------------------------------------
-
-    /**
-     * Default buttons shown when the AI is idle.
-     * Edit and Regenerate are now per-message (triggered via header long-press),
-     * so no global action buttons are registered by default.
-     */
-    var DEFAULT_BUTTONS = [];
-
-    /** Buttons shown while a generation is in progress. */
-    var STOP_BUTTONS = [
-        { label: '\u23F9 Stop', message: '' },
-    ];
-
-    /**
-     * Registers the default quick-reply buttons.
-     */
-    function registerDefaultButtons() {
-        PT.registerButtons(EXT_ID, DEFAULT_BUTTONS);
-    }
-
-    /**
-     * Swaps to the Stop button during generation.
-     */
-    function registerStopButton() {
-        PT.registerButtons(EXT_ID, STOP_BUTTONS);
-    }
-
-    // -------------------------------------------------------------------------
     // Message processing
     // -------------------------------------------------------------------------
 
@@ -466,13 +433,11 @@
     /** Fired when text generation begins. */
     function onGenerationStarted() {
         PT.log('[PTTracker] GENERATION_STARTED');
-        registerStopButton();
     }
 
     /** Fired when text generation ends or is cancelled. */
     function onGenerationStopped() {
         PT.log('[PTTracker] GENERATION_STOPPED');
-        registerDefaultButtons();
     }
 
     /** Fired when the active chat changes. */
@@ -485,13 +450,12 @@
 
     /** Fired when the active character changes. */
     function onCharacterChanged() {
-        PT.log('[PTTracker] CHARACTER_CHANGED — re-registering buttons.');
+        PT.log('[PTTracker] CHARACTER_CHANGED.');
         var s = getSettings();
         // Reset heart points to 0, then check character metadata for an override.
         var ctx = PT.getContext();
         s.heartPoints = getCharacterHeartDefault(ctx && ctx.character);
         PT.saveSettings();
-        registerDefaultButtons();
         scanRecentMessages();
         injectPrompt();
     }
@@ -563,13 +527,16 @@
             var curWeather  = regenData.currentWeather  !== undefined ? regenData.currentWeather  : (s.currentWeather  || 'unknown');
             var curHeart    = regenData.heartPoints      !== undefined ? regenData.heartPoints      : s.heartPoints;
             var prompt =
-                '[OOC: The current tracker values are:\n' +
+                '[OOC: You are reassessing the tracker values for this message.\n' +
+                'The current tracker values are:\n' +
                 '[time: ' + curTime + ']\n' +
                 '[location: ' + curLocation + ']\n' +
                 '[weather: ' + curWeather + ']\n' +
                 '[heart: ' + curHeart + ']\n\n' +
-                'Based on the most recent message, update ONLY the values that have changed. ' +
-                'Keep unchanged values exactly as they are. ' +
+                'Based on the current chat scenario and what has happened in the conversation, ' +
+                'reassess and update the tracker values. Values can change to better reflect the scene ' +
+                'but should remain consistent with previous tracker entries and the ongoing narrative. ' +
+                'Avoid drastic or random changes that contradict the established scenario.\n\n' +
                 'Output ONLY the four tracker tags and nothing else:\n' +
                 '[time: ...]\n[location: ...]\n[weather: ...]\n[heart: ...]]';
             PT.generateHidden(prompt).then(function (response) {
@@ -619,27 +586,20 @@
                 PT.log('[PTTracker] Tracker regenerated for message #' + regenIdx + '.');
             });
 
-        } else if (action === 'hide_buttons') {
-            _headerButtonsVisible = {};
-            PT.registerButtons(EXT_ID, DEFAULT_BUTTONS);
-            PT.log('[PTTracker] Per-message buttons hidden.');
         }
     }
 
     /**
      * Fired when the user long-presses a message header that this extension owns.
      * data = { messageIndex: number, extensionId: string }
-     * Replaces the global quick-reply buttons with per-message Edit/Regenerate actions.
+     * Registers inline per-message Edit/Regenerate buttons inside the header.
      */
     function onHeaderLongPressed(data) {
         var msgIndex = data.messageIndex;
         PT.log('[PTTracker] HEADER_LONG_PRESSED messageIndex=' + msgIndex);
-        if (_headerButtonsVisible[msgIndex]) return; // buttons already showing for this message
-        _headerButtonsVisible[msgIndex] = true;
-        PT.registerButtons(EXT_ID, [
-            { label: '\u270F\uFE0F Edit Tracker (msg #' + msgIndex + ')',       action: 'edit_message_' + msgIndex },
-            { label: '\uD83D\uDD04 Regenerate Tracker (msg #' + msgIndex + ')', action: 'regenerate_message_' + msgIndex },
-            { label: '\u274C Hide', action: 'hide_buttons' },
+        PT.registerHeaderButtons(EXT_ID, [
+            { label: '\u270F\uFE0F Edit',       action: 'edit_message_' + msgIndex },
+            { label: '\uD83D\uDD04 Regenerate', action: 'regenerate_message_' + msgIndex },
         ]);
     }
 
@@ -670,9 +630,6 @@
 
         // Inject the tracker system prompt.
         injectPrompt();
-
-        // Register quick-reply buttons.
-        registerDefaultButtons();
 
         // Subscribe to PT events.
         PT.eventSource.on(PT.events.MESSAGE_RECEIVED,     onMessageReceived);
