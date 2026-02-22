@@ -1,6 +1,6 @@
 # PTTracker
 
-A [PocketTavern](https://github.com/Starkka15/PocketTavern) extension that automatically extracts **Time**, **Location**, **Weather**, and **Heart Meter** data from AI responses and displays them in a neat status header above each AI message bubble.
+A [PocketTavern](https://github.com/Starkka15/PocketTavern) extension that automatically extracts **Time**, **Location**, **Weather**, and **Heart Meter** data from AI responses and displays them in a neat status header above each AI message bubble.  Tracker tags are automatically stripped from the visible message text so they never appear in the chat bubble itself.
 
 ---
 
@@ -15,7 +15,7 @@ PTTracker injects a system prompt that instructs the AI to append four structure
 [heart: points_value]
 ```
 
-After each AI message arrives, PTTracker parses those tags and renders a compact header like:
+After each AI message arrives, PTTracker parses those tags, stores the values in settings, and renders a compact header like:
 
 ```
 Time: 08:15:00; 05/21/2001 (Monday)
@@ -24,19 +24,18 @@ Weather: Cool and damp inside cave, sunny outside, 57°F
 Heart Meter: 🖤 (0)
 ```
 
-If a tag is missing from the AI response, the field shows **Unknown**.
+The raw tags are **stripped from the displayed message** via `PT.registerOutputFilter()` so the chat bubble stays clean.  If a tag is missing from the AI response, PTTracker falls back to the value stored in settings, or shows **Unknown**.
 
 ---
 
 ## Installation
 
-1. Locate your PocketTavern **Extensions** directory (typically `PocketTavern/extensions/`).
-2. Copy (or clone) this folder into that directory so the path becomes:
+1. In PocketTavern, open **Extensions → Install from URL**.
+2. Enter the raw GitHub URL for this extension:
    ```
-   PocketTavern/extensions/PTTracker/
+   https://raw.githubusercontent.com/darkcircuit102/PTTracker/main/manifest.json
    ```
-3. Restart PocketTavern (or reload the extension list).
-4. PTTracker will activate automatically on the next chat.
+3. PTTracker will download and activate automatically.
 
 ---
 
@@ -69,15 +68,32 @@ The current heart value is saved in extension settings and persists across sessi
 
 ---
 
+## Editing Tracker Values
+
+You can manually set or correct any tracker field directly in the extension settings (`PT.extension_settings['pt-tracker']`).  After saving, the updated values are immediately used as the fallback in the header and are also re-injected into the system prompt so the AI continues from the correct state.
+
+---
+
+## Output Filter
+
+At initialisation PTTracker calls:
+
+```javascript
+PT.registerOutputFilter('pt-tracker', '\\[(?:time|location|weather|heart):\\s*[^\\]]*\\]');
+```
+
+PocketTavern's Kotlin layer (`JsExtensionHost.applyOutputFilters`) uses this regex to strip matching tags from the displayed message **after** the extension has already parsed them.  This means the header is populated correctly while the chat bubble shows clean narrative text.
+
+---
+
 ## Quick-Reply Buttons
 
-PTTracker registers three convenience buttons:
+PTTracker registers two convenience buttons:
 
-| Button | Sends |
-|--------|-------|
-| ▶ Continue | "Please continue." |
-| 🔄 Refresh Tracker | Asks the AI to re-output its current tracker tags |
-| 💔 Reset Heart | Resets heart points to the configured default |
+| Button | Action |
+|--------|--------|
+| ✏️ Edit Tracker | Sends an empty message — tap this as a reminder to open extension settings and edit tracker values manually |
+| 🔄 Regenerate Tracker | Sends an OOC instruction asking the AI to reassess and re-output its tracker tags for the current scene |
 
 During generation the buttons are replaced with a ⏹ **Stop** button and restored when generation ends.
 
@@ -91,8 +107,11 @@ All settings are stored in `PT.extension_settings['pt-tracker']` and persist acr
 |---------|------|---------|-------------|
 | `enabled` | boolean | `true` | Master on/off switch |
 | `scanDepth` | number | `10` | Prompt injection depth (recent messages) |
-| `defaultHeartPoints` | number | `0` | Value used when resetting the Heart Meter |
+| `defaultHeartPoints` | number | `0` | Initial heart points value |
 | `heartPoints` | number | `0` | Current persisted heart points |
+| `currentTime` | string | `''` | Editable current time (e.g. `"08:30:00; 06/20/2011 (Sunday)"`) |
+| `currentLocation` | string | `''` | Editable current location (e.g. `"Town Square, Alexandria"`) |
+| `currentWeather` | string | `''` | Editable current weather (e.g. `"Sunny, no overcast, 80°F"`) |
 | `showTime` | boolean | `true` | Show the Time field in the header |
 | `showLocation` | boolean | `true` | Show the Location field in the header |
 | `showWeather` | boolean | `true` | Show the Weather field in the header |
@@ -128,3 +147,4 @@ PTTracker/
 ├── manifest.json  — Extension metadata
 └── README.md      — This file
 ```
+
