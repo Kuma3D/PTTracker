@@ -2,8 +2,8 @@
   "id": "pt-tracker",
   "name": "PTTracker",
   "display_name": "PT Tracker",
-  "version": "1.3.0",
+  "version": "1.0.0",
   "description": "Tracker extension for PocketTavern that scans recent messages and displays Time, Location, Weather, and Heart Meter data in a status box.",
-  "author": "darkcircuit102",
+  "author": "Kuma3D",
   "js": "index.js"
 }
