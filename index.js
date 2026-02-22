@@ -31,6 +31,12 @@
      */
     var OUTPUT_FILTER_PATTERN = '\\[(?:time|location|weather|heart):\\s*[^\\]]*\\]';
 
+    /** Stores tracker state per message index: { [messageIndex]: { currentTime, currentLocation, currentWeather, heartPoints } } */
+    var _perMessageTracker = {};
+
+    /** Tracks which message headers currently have their action buttons showing. */
+    var _headerButtonsVisible = {};
+
     /**
      * Default settings applied the first time the extension loads
      * (or when a key is missing from persisted settings).
@@ -252,6 +258,8 @@
             'Current tracker state (continue from here):\n' +
             currentState + '\n' +
             '\n' +
+            'Update ONLY the values that have changed. Keep unchanged values exactly as they are.\n' +
+            '\n' +
             'Example tags:\n' +
             '[time: 8:15 AM; 05/21/2001 (Monday)]\n' +
             '[location: Mako Crystal Cave, Eastern Trail, Mount Nibel, Nibelheim]\n' +
@@ -287,13 +295,10 @@
 
     /**
      * Default buttons shown when the AI is idle.
-     * - Edit Tracker: opens a native edit dialog for all tracker fields
-     * - Regenerate Tracker: silently regenerates tracker metadata via hidden generation
+     * Edit and Regenerate are now per-message (triggered via header long-press),
+     * so no global action buttons are registered by default.
      */
-    var DEFAULT_BUTTONS = [
-        { label: '\u270F\uFE0F Edit Tracker',       action: 'edit_tracker' },
-        { label: '\uD83D\uDD04 Regenerate Tracker', action: 'regenerate_tracker' },
-    ];
+    var DEFAULT_BUTTONS = [];
 
     /** Buttons shown while a generation is in progress. */
     var STOP_BUTTONS = [
@@ -346,6 +351,12 @@
                 var parsed = parseInt(tags.heart, 10);
                 if (!isNaN(parsed)) { s.heartPoints = Math.max(0, parsed); }
             }
+            _perMessageTracker[aiMsgs[j].index] = {
+                currentTime:     s.currentTime,
+                currentLocation: s.currentLocation,
+                currentWeather:  s.currentWeather,
+                heartPoints:     s.heartPoints,
+            };
         }
         PT.saveSettings();
 
@@ -353,7 +364,7 @@
         for (var k = 0; k < aiMsgs.length; k++) {
             var msgTags = parseTags(aiMsgs[k].text);
             var header = buildHeader(msgTags, s);
-            PT.setMessageHeader(aiMsgs[k].index, header);
+            PT.setMessageHeader(aiMsgs[k].index, header, EXT_ID);
         }
     }
 
@@ -404,8 +415,15 @@
 
         PT.saveSettings();
 
+        _perMessageTracker[messageIndex] = {
+            currentTime:     s.currentTime,
+            currentLocation: s.currentLocation,
+            currentWeather:  s.currentWeather,
+            heartPoints:     s.heartPoints,
+        };
+
         var header = buildHeader(tags, s);
-        PT.setMessageHeader(messageIndex, header);
+        PT.setMessageHeader(messageIndex, header, EXT_ID);
         PT.log('[PTTracker] Header set for message #' + messageIndex + '.');
 
         // Re-inject prompt so the AI always sees the latest tracker state.
@@ -485,80 +503,144 @@
     function onButtonClicked(data) {
         PT.log('[PTTracker] BUTTON_CLICKED action=' + data.action);
         var s = getSettings();
+        var action = data.action;
 
-        if (data.action === 'edit_tracker') {
+        if (action.indexOf('edit_message_') === 0) {
+            var editIdx = parseInt(action.substring('edit_message_'.length), 10);
+            var editData = _perMessageTracker[editIdx] || {};
             PT.showEditDialog('Edit Tracker', [
-                { key: 'time',     label: 'Time',         value: s.currentTime     || '' },
-                { key: 'location', label: 'Location',     value: s.currentLocation || '' },
-                { key: 'weather',  label: 'Weather',      value: s.currentWeather  || '' },
-                { key: 'heart',    label: 'Heart Points', value: String(s.heartPoints) },
+                { key: 'time',     label: 'Time',         value: editData.currentTime     || s.currentTime     || '' },
+                { key: 'location', label: 'Location',     value: editData.currentLocation || s.currentLocation || '' },
+                { key: 'weather',  label: 'Weather',      value: editData.currentWeather  || s.currentWeather  || '' },
+                { key: 'heart',    label: 'Heart Points', value: String(editData.heartPoints !== undefined ? editData.heartPoints : s.heartPoints) },
             ]).then(function (result) {
-                if (!result) return; // user cancelled
-                if (result.time     !== undefined) { s.currentTime     = result.time; }
-                if (result.location !== undefined) { s.currentLocation = result.location; }
-                if (result.weather  !== undefined) { s.currentWeather  = result.weather; }
-                if (result.heart    !== undefined) {
+                if (!result) return;
+                var newTime     = result.time     !== undefined ? result.time     : (editData.currentTime     || s.currentTime     || '');
+                var newLocation = result.location !== undefined ? result.location : (editData.currentLocation || s.currentLocation || '');
+                var newWeather  = result.weather  !== undefined ? result.weather  : (editData.currentWeather  || s.currentWeather  || '');
+                // Start from the stored value; override with the user's edited value if provided.
+                var newHeart    = editData.heartPoints !== undefined ? editData.heartPoints : s.heartPoints;
+                if (result.heart !== undefined) {
                     var pts = parseInt(result.heart, 10);
-                    if (!isNaN(pts)) { s.heartPoints = Math.max(0, pts); }
+                    if (!isNaN(pts)) { newHeart = Math.max(0, pts); }
                 }
-                PT.saveSettings();
-                // Rebuild header for the most recent AI message.
+                _perMessageTracker[editIdx] = {
+                    currentTime: newTime, currentLocation: newLocation,
+                    currentWeather: newWeather, heartPoints: newHeart,
+                };
+                var tempSettings = {
+                    showTime: s.showTime, showLocation: s.showLocation,
+                    showWeather: s.showWeather, showHeartMeter: s.showHeartMeter,
+                    currentTime: newTime, currentLocation: newLocation,
+                    currentWeather: newWeather, heartPoints: newHeart,
+                };
+                // Pass null tags so buildHeader falls back entirely to tempSettings values.
+                PT.setMessageHeader(editIdx, buildHeader({ time: null, location: null, weather: null, heart: null }, tempSettings), EXT_ID);
+                // Update global settings if this is the most recent AI message.
                 var ctx = PT.getContext();
                 if (ctx && ctx.recentMessages) {
                     var msgs = ctx.recentMessages;
                     for (var i = msgs.length - 1; i >= 0; i--) {
                         if (!msgs[i].isUser) {
-                            var tags = parseTags(msgs[i].text);
-                            PT.setMessageHeader(msgs[i].index, buildHeader(tags, s));
+                            if (msgs[i].index === editIdx) {
+                                s.currentTime = newTime; s.currentLocation = newLocation;
+                                s.currentWeather = newWeather; s.heartPoints = newHeart;
+                                PT.saveSettings();
+                                injectPrompt();
+                            }
                             break;
                         }
                     }
                 }
-                injectPrompt();
-                PT.log('[PTTracker] Tracker updated via Edit dialog.');
+                PT.log('[PTTracker] Tracker updated via Edit dialog for message #' + editIdx + '.');
             });
 
-        } else if (data.action === 'regenerate_tracker') {
+        } else if (action.indexOf('regenerate_message_') === 0) {
+            var regenIdx = parseInt(action.substring('regenerate_message_'.length), 10);
+            var regenData = _perMessageTracker[regenIdx] || {};
+            var curTime     = regenData.currentTime     !== undefined ? regenData.currentTime     : (s.currentTime     || 'unknown');
+            var curLocation = regenData.currentLocation !== undefined ? regenData.currentLocation : (s.currentLocation || 'unknown');
+            var curWeather  = regenData.currentWeather  !== undefined ? regenData.currentWeather  : (s.currentWeather  || 'unknown');
+            var curHeart    = regenData.heartPoints      !== undefined ? regenData.heartPoints      : s.heartPoints;
             var prompt =
-                '[OOC: Please re-assess the current scene and re-output ONLY the four tracker tags. ' +
-                'Output exactly these tags and nothing else:\n' +
-                '[time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]\n' +
-                '[location: Full Location Description]\n' +
-                '[weather: Weather Description, Temperature]\n' +
-                '[heart: points_value]]';
+                '[OOC: The current tracker values are:\n' +
+                '[time: ' + curTime + ']\n' +
+                '[location: ' + curLocation + ']\n' +
+                '[weather: ' + curWeather + ']\n' +
+                '[heart: ' + curHeart + ']\n\n' +
+                'Based on the most recent message, update ONLY the values that have changed. ' +
+                'Keep unchanged values exactly as they are. ' +
+                'Output ONLY the four tracker tags and nothing else:\n' +
+                '[time: ...]\n[location: ...]\n[weather: ...]\n[heart: ...]]';
             PT.generateHidden(prompt).then(function (response) {
                 if (!response) return;
                 var tags = parseTags(response);
                 var updated = false;
-                if (tags.time     !== null) { s.currentTime     = convertTo12Hour(tags.time); updated = true; }
-                if (tags.location !== null) { s.currentLocation = tags.location;              updated = true; }
-                if (tags.weather  !== null) { s.currentWeather  = tags.weather;               updated = true; }
+                var newTime     = curTime;
+                var newLocation = curLocation;
+                var newWeather  = curWeather;
+                var newHeart    = curHeart;
+                if (tags.time     !== null) { newTime     = convertTo12Hour(tags.time); updated = true; }
+                if (tags.location !== null) { newLocation = tags.location;              updated = true; }
+                if (tags.weather  !== null) { newWeather  = tags.weather;               updated = true; }
                 if (tags.heart !== null) {
                     var pts = parseInt(tags.heart, 10);
-                    if (!isNaN(pts)) { s.heartPoints = Math.max(0, pts); updated = true; }
+                    if (!isNaN(pts)) { newHeart = Math.max(0, pts); updated = true; }
                 }
                 if (!updated) return;
-                PT.saveSettings();
-                // Update the header of the most recent AI message with the new tags.
+                _perMessageTracker[regenIdx] = {
+                    currentTime: newTime, currentLocation: newLocation,
+                    currentWeather: newWeather, heartPoints: newHeart,
+                };
+                var tempSettings = {
+                    showTime: s.showTime, showLocation: s.showLocation,
+                    showWeather: s.showWeather, showHeartMeter: s.showHeartMeter,
+                    currentTime: newTime, currentLocation: newLocation,
+                    currentWeather: newWeather, heartPoints: newHeart,
+                };
+                // Pass null tags so buildHeader falls back entirely to tempSettings values.
+                PT.setMessageHeader(regenIdx, buildHeader({ time: null, location: null, weather: null, heart: null }, tempSettings), EXT_ID);
+                // Update global settings if this is the most recent AI message.
                 var ctx = PT.getContext();
                 if (ctx && ctx.recentMessages) {
                     var msgs = ctx.recentMessages;
                     for (var i = msgs.length - 1; i >= 0; i--) {
                         if (!msgs[i].isUser) {
-                            var msgTags = parseTags(msgs[i].text);
-                            // Merge regenerated tags into message tags.
-                            if (tags.time     !== null) { msgTags.time     = s.currentTime; }
-                            if (tags.location !== null) { msgTags.location = s.currentLocation; }
-                            if (tags.weather  !== null) { msgTags.weather  = s.currentWeather; }
-                            PT.setMessageHeader(msgs[i].index, buildHeader(msgTags, s));
+                            if (msgs[i].index === regenIdx) {
+                                s.currentTime = newTime; s.currentLocation = newLocation;
+                                s.currentWeather = newWeather; s.heartPoints = newHeart;
+                                PT.saveSettings();
+                                injectPrompt();
+                            }
                             break;
                         }
                     }
                 }
-                injectPrompt();
-                PT.log('[PTTracker] Tracker regenerated via hidden generation.');
+                PT.log('[PTTracker] Tracker regenerated for message #' + regenIdx + '.');
             });
+
+        } else if (action === 'hide_buttons') {
+            _headerButtonsVisible = {};
+            PT.registerButtons(EXT_ID, DEFAULT_BUTTONS);
+            PT.log('[PTTracker] Per-message buttons hidden.');
         }
+    }
+
+    /**
+     * Fired when the user long-presses a message header that this extension owns.
+     * data = { messageIndex: number, extensionId: string }
+     * Replaces the global quick-reply buttons with per-message Edit/Regenerate actions.
+     */
+    function onHeaderLongPressed(data) {
+        var msgIndex = data.messageIndex;
+        PT.log('[PTTracker] HEADER_LONG_PRESSED messageIndex=' + msgIndex);
+        if (_headerButtonsVisible[msgIndex]) return; // buttons already showing for this message
+        _headerButtonsVisible[msgIndex] = true;
+        PT.registerButtons(EXT_ID, [
+            { label: '\u270F\uFE0F Edit Tracker (msg #' + msgIndex + ')',       action: 'edit_message_' + msgIndex },
+            { label: '\uD83D\uDD04 Regenerate Tracker (msg #' + msgIndex + ')', action: 'regenerate_message_' + msgIndex },
+            { label: '\u274C Hide', action: 'hide_buttons' },
+        ]);
     }
 
     // -------------------------------------------------------------------------
@@ -593,14 +675,15 @@
         registerDefaultButtons();
 
         // Subscribe to PT events.
-        PT.eventSource.on(PT.events.MESSAGE_RECEIVED,   onMessageReceived);
-        PT.eventSource.on(PT.events.MESSAGE_EDITED,     onMessageEdited);
-        PT.eventSource.on(PT.events.MESSAGE_DELETED,    onMessageDeleted);
-        PT.eventSource.on(PT.events.GENERATION_STARTED, onGenerationStarted);
-        PT.eventSource.on(PT.events.GENERATION_STOPPED, onGenerationStopped);
-        PT.eventSource.on(PT.events.CHAT_CHANGED,       onChatChanged);
-        PT.eventSource.on(PT.events.CHARACTER_CHANGED,  onCharacterChanged);
-        PT.eventSource.on(PT.events.BUTTON_CLICKED,     onButtonClicked);
+        PT.eventSource.on(PT.events.MESSAGE_RECEIVED,     onMessageReceived);
+        PT.eventSource.on(PT.events.MESSAGE_EDITED,       onMessageEdited);
+        PT.eventSource.on(PT.events.MESSAGE_DELETED,      onMessageDeleted);
+        PT.eventSource.on(PT.events.GENERATION_STARTED,   onGenerationStarted);
+        PT.eventSource.on(PT.events.GENERATION_STOPPED,   onGenerationStopped);
+        PT.eventSource.on(PT.events.CHAT_CHANGED,         onChatChanged);
+        PT.eventSource.on(PT.events.CHARACTER_CHANGED,    onCharacterChanged);
+        PT.eventSource.on(PT.events.BUTTON_CLICKED,       onButtonClicked);
+        PT.eventSource.on(PT.events.HEADER_LONG_PRESSED,  onHeaderLongPressed);
 
         PT.log('[PTTracker] Ready.');
     }
