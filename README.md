@@ -33,7 +33,7 @@ The raw tags are **stripped from the displayed message** via `PT.registerOutputF
 1. In PocketTavern, open **Extensions → Install from URL**.
 2. Enter the raw GitHub URL for this extension:
    ```
-   https://raw.githubusercontent.com/darkcircuit102/PTTracker/main/manifest.json
+   https://raw.githubusercontent.com/Kuma3D/PTTracker/main/index.js
    ```
 3. PTTracker will download and activate automatically.
 
