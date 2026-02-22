@@ -26,8 +26,6 @@
      * Regex pattern registered with PT.registerOutputFilter() so PocketTavern's
      * Kotlin side (JsExtensionHost.applyOutputFilters) strips the tracker tags
      * from the displayed message bubble AFTER the extension has parsed them.
-     * The doubled backslashes are JavaScript string escaping — the Kotlin side
-     * receives the single-backslash regex: \[(?:time|location|weather|heart):\s*[^\]]*\]
      */
     var OUTPUT_FILTER_PATTERN = '\\[(?:time|location|weather|heart):\\s*[^\\]]*\\]';
 
@@ -110,7 +108,6 @@
 
     /**
      * Maps a numeric heart-points value to the corresponding emoji.
-     * Values below 0 are treated as 0; values above 69,999 map to ❤️.
      *
      * @param {number} points
      * @returns {string} emoji character
@@ -147,6 +144,16 @@
             weather:  extract(/\[weather:\s*([^\]]+)\]/i),
             heart:    extract(/\[heart:\s*([^\]]+)\]/i),
         };
+    }
+
+    /**
+     * Returns true if at least one tracker tag was found.
+     * @param {{ time: string|null, location: string|null, weather: string|null, heart: string|null }} tags
+     * @returns {boolean}
+     */
+    function hasTags(tags) {
+        return tags.time !== null || tags.location !== null ||
+               tags.weather !== null || tags.heart !== null;
     }
 
     // -------------------------------------------------------------------------
@@ -217,8 +224,7 @@
 
     /**
      * Builds the tracker system prompt including the current tracker state
-     * so the AI knows the starting point.  Uses {{user}} which PocketTavern
-     * substitutes with the persona name.
+     * so the AI knows the starting point.
      *
      * @param {object} settings  Current extension settings.
      * @returns {string}
@@ -244,13 +250,13 @@
             'After each message, assess the character and {{user}}\'s relationship and assign a heart points value showing the romantic interest the character has for {{user}}. The Heart Meter can increase or decrease depending on the interactions with {{user}}. The level it increases or decreases can range dramatically and can even go up and down entire heart levels in one post. The maximum amount of points it can increase or decrease is 10000.\n' +
             '\n' +
             'Heart point ranges:\n' +
-            '  0 – 4,999     → 🖤 Black Heart\n' +
-            '  5,000 – 19,999  → 💜 Purple Heart\n' +
-            '  20,000 – 29,999 → 💙 Blue Heart\n' +
-            '  30,000 – 39,999 → 💚 Green Heart\n' +
-            '  40,000 – 49,999 → 💛 Yellow Heart\n' +
-            '  50,000 – 59,999 → 🧡 Orange Heart\n' +
-            '  60,000 – 69,999 → ❤️ Red Heart\n' +
+            '  0 – 4,999     \u2192 \uD83D\uDDA4 Black Heart\n' +
+            '  5,000 – 19,999  \u2192 \uD83D\uDC9C Purple Heart\n' +
+            '  20,000 – 29,999 \u2192 \uD83D\uDC99 Blue Heart\n' +
+            '  30,000 – 39,999 \u2192 \uD83D\uDC9A Green Heart\n' +
+            '  40,000 – 49,999 \u2192 \uD83D\uDC9B Yellow Heart\n' +
+            '  50,000 – 59,999 \u2192 \uD83E\uDDE1 Orange Heart\n' +
+            '  60,000 – 69,999 \u2192 \u2764\uFE0F Red Heart\n' +
             '\n' +
             'Current tracker state (continue from here):\n' +
             currentState + '\n' +
@@ -260,7 +266,7 @@
             'Example tags:\n' +
             '[time: 8:15 AM; 05/21/2001 (Monday)]\n' +
             '[location: Mako Crystal Cave, Eastern Trail, Mount Nibel, Nibelheim]\n' +
-            '[weather: Cool and damp inside cave, sunny outside, 57°F]\n' +
+            '[weather: Cool and damp inside cave, sunny outside, 57\u00B0F]\n' +
             '[heart: 0]'
         );
     }
@@ -273,7 +279,6 @@
     function injectPrompt() {
         var s = getSettings();
         if (!s.enabled) {
-            // Remove the prompt when the extension is disabled.
             PT.setExtensionPrompt(EXT_ID, '', PT.INJECTION_POSITION.AFTER_CHAR_DEFS, s.scanDepth);
             return;
         }
@@ -293,6 +298,9 @@
     /**
      * Scans the last 2 AI messages for tracker data, updates settings, and
      * rebuilds their headers.  Called on init, chat change, and character change.
+     *
+     * FIX: Only sets headers on messages that actually contain tracker tags.
+     * Messages without tags (e.g. the greeting) are skipped entirely.
      */
     function scanRecentMessages() {
         var ctx = PT.getContext();
@@ -309,8 +317,15 @@
         if (aiMsgs.length === 0) return;
 
         var s = getSettings();
+        var anyUpdated = false;
+
         for (var j = 0; j < aiMsgs.length; j++) {
             var tags = parseTags(aiMsgs[j].text);
+
+            // Skip messages that have NO tracker tags at all (e.g. greeting)
+            if (!hasTags(tags)) continue;
+
+            anyUpdated = true;
             if (tags.time     !== null) { s.currentTime     = convertTo12Hour(tags.time); }
             if (tags.location !== null) { s.currentLocation = tags.location; }
             if (tags.weather  !== null) { s.currentWeather  = tags.weather; }
@@ -324,20 +339,22 @@
                 currentWeather:  s.currentWeather,
                 heartPoints:     s.heartPoints,
             };
-        }
-        PT.saveSettings();
 
-        // Rebuild headers for the scanned messages.
-        for (var k = 0; k < aiMsgs.length; k++) {
-            var msgTags = parseTags(aiMsgs[k].text);
-            var header = buildHeader(msgTags, s);
-            PT.setMessageHeader(aiMsgs[k].index, header, EXT_ID);
+            // Rebuild header for this message
+            var header = buildHeader(tags, s);
+            PT.setMessageHeader(aiMsgs[j].index, header, EXT_ID);
+        }
+
+        if (anyUpdated) {
+            PT.saveSettings();
         }
     }
 
     /**
      * Parses tags from an AI message, updates persisted tracker fields,
      * rebuilds the header, and re-injects the prompt with the updated state.
+     *
+     * FIX: Only sets a header if the message actually contains at least one tag.
      *
      * @param {string} text         Raw message text from the AI.
      * @param {number} messageIndex Index of the message in the chat.
@@ -348,7 +365,11 @@
 
         var tags = parseTags(text);
 
-        // If current message is missing some tags, check the previous AI message for context.
+        // If the message has NO tracker tags at all, don't set a header.
+        // This prevents phantom headers on greetings and other tag-free messages.
+        if (!hasTags(tags)) return;
+
+        // If current message is missing SOME tags, check the previous AI message for context.
         if (tags.time === null || tags.location === null || tags.weather === null || tags.heart === null) {
             var ctx = PT.getContext();
             if (ctx && ctx.recentMessages) {
@@ -397,6 +418,37 @@
         injectPrompt();
     }
 
+    /**
+     * Finds the previous AI message's tracker header text using
+     * PT.getMessageHeaders(). Returns the header text or null.
+     *
+     * @param {number} beforeIndex  Only consider messages before this index.
+     * @returns {string|null}
+     */
+    function getPreviousTrackerHeader(beforeIndex) {
+        var ctx = PT.getContext();
+        if (!ctx || !ctx.recentMessages) return null;
+        var msgs = ctx.recentMessages;
+        for (var i = msgs.length - 1; i >= 0; i--) {
+            if (!msgs[i].isUser && msgs[i].index < beforeIndex) {
+                var headers = PT.getMessageHeaders(msgs[i].index);
+                for (var h = 0; h < headers.length; h++) {
+                    if (headers[h].extensionId === EXT_ID) {
+                        return headers[h].text;
+                    }
+                }
+                // No persisted header — try parsing raw text instead
+                var rawTags = parseTags(msgs[i].text);
+                if (hasTags(rawTags)) {
+                    var s = getSettings();
+                    return buildHeader(rawTags, s);
+                }
+                return null;
+            }
+        }
+        return null;
+    }
+
     // -------------------------------------------------------------------------
     // Event handlers
     // -------------------------------------------------------------------------
@@ -417,17 +469,16 @@
     function onMessageEdited(data) {
         PT.log('[PTTracker] MESSAGE_EDITED');
         if (!data.isUser) {
-            // Only AI messages carry tracker tags.
             processAiMessage(data.text, data.index);
         } else {
-            // If a user message is edited, clear any stale header.
             PT.clearMessageHeader(data.index);
         }
     }
 
     /** Fired when a message is deleted. */
     function onMessageDeleted() {
-        PT.log('[PTTracker] MESSAGE_DELETED — message removed; no header action needed.');
+        PT.log('[PTTracker] MESSAGE_DELETED — clearing in-memory tracker cache.');
+        _perMessageTracker = {};
     }
 
     /** Fired when text generation begins. */
@@ -444,6 +495,7 @@
     function onChatChanged() {
         PT.log('[PTTracker] CHAT_CHANGED — clearing all headers.');
         PT.clearAllHeaders();
+        _perMessageTracker = {};
         scanRecentMessages();
         injectPrompt();
     }
@@ -452,10 +504,16 @@
     function onCharacterChanged() {
         PT.log('[PTTracker] CHARACTER_CHANGED.');
         var s = getSettings();
-        // Reset heart points to 0, then check character metadata for an override.
+        // Only reset heart points if this is the first time seeing this character
+        // (settings still at default 0 and character has a heart_default tag).
+        // Otherwise preserve the earned heart points from gameplay.
         var ctx = PT.getContext();
-        s.heartPoints = getCharacterHeartDefault(ctx && ctx.character);
-        PT.saveSettings();
+        var charDefault = getCharacterHeartDefault(ctx && ctx.character);
+        if (s.heartPoints === 0 && charDefault > 0) {
+            s.heartPoints = charDefault;
+            PT.saveSettings();
+        }
+        _perMessageTracker = {};
         scanRecentMessages();
         injectPrompt();
     }
@@ -482,7 +540,6 @@
                 var newTime     = result.time     !== undefined ? result.time     : (editData.currentTime     || s.currentTime     || '');
                 var newLocation = result.location !== undefined ? result.location : (editData.currentLocation || s.currentLocation || '');
                 var newWeather  = result.weather  !== undefined ? result.weather  : (editData.currentWeather  || s.currentWeather  || '');
-                // Start from the stored value; override with the user's edited value if provided.
                 var newHeart    = editData.heartPoints !== undefined ? editData.heartPoints : s.heartPoints;
                 if (result.heart !== undefined) {
                     var pts = parseInt(result.heart, 10);
@@ -498,7 +555,6 @@
                     currentTime: newTime, currentLocation: newLocation,
                     currentWeather: newWeather, heartPoints: newHeart,
                 };
-                // Pass null tags so buildHeader falls back entirely to tempSettings values.
                 PT.setMessageHeader(editIdx, buildHeader({ time: null, location: null, weather: null, heart: null }, tempSettings), EXT_ID);
                 // Update global settings if this is the most recent AI message.
                 var ctx = PT.getContext();
@@ -521,40 +577,50 @@
 
         } else if (action.indexOf('regenerate_message_') === 0) {
             var regenIdx = parseInt(action.substring('regenerate_message_'.length), 10);
-            var regenData = _perMessageTracker[regenIdx] || {};
-            var curTime     = regenData.currentTime     !== undefined ? regenData.currentTime     : (s.currentTime     || 'unknown');
-            var curLocation = regenData.currentLocation !== undefined ? regenData.currentLocation : (s.currentLocation || 'unknown');
-            var curWeather  = regenData.currentWeather  !== undefined ? regenData.currentWeather  : (s.currentWeather  || 'unknown');
-            var curHeart    = regenData.heartPoints      !== undefined ? regenData.heartPoints      : s.heartPoints;
+
+            // Get the PREVIOUS message's tracker header as reference context.
+            // Completely ignores the current message's tracker values.
+            var prevHeaderText = getPreviousTrackerHeader(regenIdx);
+
             var prompt =
-                '[OOC: You are reassessing the tracker values for this message.\n' +
-                'The current tracker values are:\n' +
-                '[time: ' + curTime + ']\n' +
-                '[location: ' + curLocation + ']\n' +
-                '[weather: ' + curWeather + ']\n' +
-                '[heart: ' + curHeart + ']\n\n' +
-                'Based on the current chat scenario and what has happened in the conversation, ' +
-                'reassess and update the tracker values. Values can change to better reflect the scene ' +
-                'but should remain consistent with previous tracker entries and the ongoing narrative. ' +
-                'Avoid drastic or random changes that contradict the established scenario.\n\n' +
+                '[OOC: Based ONLY on the conversation history and what has happened in the story, ' +
+                'determine what the tracker values should be for this point in the narrative. ' +
+                'Do NOT copy values — derive everything fresh from the scene context.\n\n';
+
+            if (prevHeaderText) {
+                prompt +=
+                    'The PREVIOUS message\'s tracker state was:\n' +
+                    prevHeaderText + '\n\n' +
+                    'Use this only as a reference point for continuity. ' +
+                    'Values should reflect what has changed since then based on the story.\n\n';
+            }
+
+            prompt +=
+                'Consider:\n' +
+                '- What time of day and date it should be based on story progression\n' +
+                '- Where the characters are currently located in the scene\n' +
+                '- What the weather and environment are like\n' +
+                '- How the character feels about {{user}} based on their interactions (heart points 0-69999)\n\n' +
                 'Output ONLY the four tracker tags and nothing else:\n' +
-                '[time: ...]\n[location: ...]\n[weather: ...]\n[heart: ...]]';
+                '[time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]\n' +
+                '[location: Full Location Description]\n' +
+                '[weather: Weather Description, Temperature]\n' +
+                '[heart: points_value]]';
+
             PT.generateHidden(prompt).then(function (response) {
                 if (!response) return;
                 var tags = parseTags(response);
-                var updated = false;
-                var newTime     = curTime;
-                var newLocation = curLocation;
-                var newWeather  = curWeather;
-                var newHeart    = curHeart;
-                if (tags.time     !== null) { newTime     = convertTo12Hour(tags.time); updated = true; }
-                if (tags.location !== null) { newLocation = tags.location;              updated = true; }
-                if (tags.weather  !== null) { newWeather  = tags.weather;               updated = true; }
+                if (!hasTags(tags)) return;
+
+                var newTime     = tags.time     !== null ? convertTo12Hour(tags.time) : (s.currentTime     || 'Unknown');
+                var newLocation = tags.location !== null ? tags.location              : (s.currentLocation || 'Unknown');
+                var newWeather  = tags.weather  !== null ? tags.weather               : (s.currentWeather  || 'Unknown');
+                var newHeart    = s.heartPoints;
                 if (tags.heart !== null) {
                     var pts = parseInt(tags.heart, 10);
-                    if (!isNaN(pts)) { newHeart = Math.max(0, pts); updated = true; }
+                    if (!isNaN(pts)) { newHeart = Math.max(0, pts); }
                 }
-                if (!updated) return;
+
                 _perMessageTracker[regenIdx] = {
                     currentTime: newTime, currentLocation: newLocation,
                     currentWeather: newWeather, heartPoints: newHeart,
@@ -565,7 +631,6 @@
                     currentTime: newTime, currentLocation: newLocation,
                     currentWeather: newWeather, heartPoints: newHeart,
                 };
-                // Pass null tags so buildHeader falls back entirely to tempSettings values.
                 PT.setMessageHeader(regenIdx, buildHeader({ time: null, location: null, weather: null, heart: null }, tempSettings), EXT_ID);
                 // Update global settings if this is the most recent AI message.
                 var ctx = PT.getContext();
@@ -585,7 +650,6 @@
                 }
                 PT.log('[PTTracker] Tracker regenerated for message #' + regenIdx + '.');
             });
-
         }
     }
 
@@ -611,17 +675,22 @@
      * Entry point — called once when PocketTavern loads the extension.
      */
     function init() {
-        PT.log('[PTTracker] Initialising…');
+        PT.log('[PTTracker] Initialising\u2026');
 
         // Ensure settings exist with sensible defaults.
         var s = getSettings();
-        // Reset heart points to 0, then check character metadata for an override.
+
+        // Only set heart default on first-ever load (when heartPoints is still
+        // at 0 and the character has a heart_default tag). This preserves
+        // earned heart progress across reloads.
         var ctx = PT.getContext();
-        s.heartPoints = getCharacterHeartDefault(ctx && ctx.character);
+        var charDefault = getCharacterHeartDefault(ctx && ctx.character);
+        if (s.heartPoints === 0 && charDefault > 0) {
+            s.heartPoints = charDefault;
+        }
         PT.saveSettings();
 
-        // Register the output filter so PocketTavern's Kotlin side strips tracker
-        // tags from displayed message bubbles AFTER this extension has parsed them.
+        // Register the output filter so tracker tags are stripped from display.
         PT.registerOutputFilter(EXT_ID, OUTPUT_FILTER_PATTERN);
         PT.log('[PTTracker] Output filter registered.');
 
