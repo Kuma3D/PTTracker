@@ -7,7 +7,7 @@
  * displayed message text via PT.registerOutputFilter().
  *
  * Tags expected in AI responses:
- *   [time: HH:MM:SS; MM/DD/YYYY (DayOfWeek)]
+ *   [time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]
  *   [location: Full Location Description]
  *   [weather: Weather Description, Temperature]
  *   [heart: points_value]
@@ -56,8 +56,54 @@
     };
 
     // -------------------------------------------------------------------------
+    // Time helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Converts a 24-hour time string (HH:MM or HH:MM:SS, optionally followed
+     * by "; MM/DD/YYYY (DayOfWeek)") to 12-hour format with AM/PM.
+     * Returns the original string unchanged if it is already in 12-hour format
+     * or does not match the expected pattern.
+     *
+     * @param {string} timeStr
+     * @returns {string}
+     */
+    function convertTo12Hour(timeStr) {
+        if (!timeStr) return timeStr;
+        // Already in 12-hour format — leave it alone.
+        if (/AM|PM/i.test(timeStr)) return timeStr;
+        // Match HH:MM or HH:MM:SS, optionally followed by "; date" portion.
+        var match = timeStr.match(/^(\d{1,2}):(\d{2})(?::\d{2})?(\s*;.*)?$/);
+        if (!match) return timeStr;
+        var hours = parseInt(match[1], 10);
+        var minutes = match[2];
+        var rest = match[3] || '';
+        if (hours < 0 || hours > 23) return timeStr;
+        var period = hours >= 12 ? 'PM' : 'AM';
+        var h12 = hours % 12 || 12;
+        return h12 + ':' + minutes + ' ' + period + rest;
+    }
+
+    // -------------------------------------------------------------------------
     // Heart Meter helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Reads heart-default metadata from a character object.
+     * Returns the value of the first `[heart_default: N]` tag found across
+     * description, personality, and scenario fields, or 0 if none is found.
+     *
+     * @param {object} character  Character object from PT.getContext().
+     * @returns {number}
+     */
+    function getCharacterHeartDefault(character) {
+        if (!character) return 0;
+        var desc = (character.description || '') + ' ' +
+                   (character.personality || '') + ' ' +
+                   (character.scenario    || '');
+        var heartMatch = desc.match(/\[heart_default:\s*(\d+)\]/i);
+        return heartMatch ? Math.max(0, parseInt(heartMatch[1], 10)) : 0;
+    }
 
     /**
      * Maps a numeric heart-points value to the corresponding emoji.
@@ -117,7 +163,7 @@
         var lines = [];
 
         if (settings.showTime) {
-            var timeVal = tags.time || settings.currentTime || 'Unknown';
+            var timeVal = convertTo12Hour(tags.time || settings.currentTime || 'Unknown');
             lines.push('Time: ' + timeVal);
         }
         if (settings.showLocation) {
@@ -186,7 +232,7 @@
             '[PTTracker Instructions]\n' +
             'At the end of EVERY response, you must include all four of the following tracker tags on separate lines. Keep them at the very end of your message, after any narrative content.\n' +
             '\n' +
-            '[time: HH:MM:SS; MM/DD/YYYY (DayOfWeek)]\n' +
+            '[time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]\n' +
             '[location: Full Location Description]\n' +
             '[weather: Weather Description, Temperature]\n' +
             '[heart: points_value]\n' +
@@ -207,7 +253,7 @@
             currentState + '\n' +
             '\n' +
             'Example tags:\n' +
-            '[time: 08:15:00; 05/21/2001 (Monday)]\n' +
+            '[time: 8:15 AM; 05/21/2001 (Monday)]\n' +
             '[location: Mako Crystal Cave, Eastern Trail, Mount Nibel, Nibelheim]\n' +
             '[weather: Cool and damp inside cave, sunny outside, 57°F]\n' +
             '[heart: 0]'
@@ -241,12 +287,12 @@
 
     /**
      * Default buttons shown when the AI is idle.
-     * - Edit Tracker: sends empty string (hint to user to edit via settings)
-     * - Regenerate Tracker: asks the AI to re-output its tracker tags
+     * - Edit Tracker: opens a native edit dialog for all tracker fields
+     * - Regenerate Tracker: silently regenerates tracker metadata via hidden generation
      */
     var DEFAULT_BUTTONS = [
-        { label: '\u270F\uFE0F Edit Tracker',       message: '' },
-        { label: '\uD83D\uDD04 Regenerate Tracker', message: '[OOC: Please reassess and re-output your tracker tags for the current scene: [time:...] [location:...] [weather:...] [heart:...]]' },
+        { label: '\u270F\uFE0F Edit Tracker',       action: 'edit_tracker' },
+        { label: '\uD83D\uDD04 Regenerate Tracker', action: 'regenerate_tracker' },
     ];
 
     /** Buttons shown while a generation is in progress. */
@@ -273,6 +319,45 @@
     // -------------------------------------------------------------------------
 
     /**
+     * Scans the last 2 AI messages for tracker data, updates settings, and
+     * rebuilds their headers.  Called on init, chat change, and character change.
+     */
+    function scanRecentMessages() {
+        var ctx = PT.getContext();
+        if (!ctx || !ctx.recentMessages) return;
+        var msgs = ctx.recentMessages;
+
+        // Collect last 2 AI messages (oldest first).
+        var aiMsgs = [];
+        for (var i = msgs.length - 1; i >= 0 && aiMsgs.length < 2; i--) {
+            if (!msgs[i].isUser) {
+                aiMsgs.unshift(msgs[i]);
+            }
+        }
+        if (aiMsgs.length === 0) return;
+
+        var s = getSettings();
+        for (var j = 0; j < aiMsgs.length; j++) {
+            var tags = parseTags(aiMsgs[j].text);
+            if (tags.time     !== null) { s.currentTime     = convertTo12Hour(tags.time); }
+            if (tags.location !== null) { s.currentLocation = tags.location; }
+            if (tags.weather  !== null) { s.currentWeather  = tags.weather; }
+            if (tags.heart !== null) {
+                var parsed = parseInt(tags.heart, 10);
+                if (!isNaN(parsed)) { s.heartPoints = Math.max(0, parsed); }
+            }
+        }
+        PT.saveSettings();
+
+        // Rebuild headers for the scanned messages.
+        for (var k = 0; k < aiMsgs.length; k++) {
+            var msgTags = parseTags(aiMsgs[k].text);
+            var header = buildHeader(msgTags, s);
+            PT.setMessageHeader(aiMsgs[k].index, header);
+        }
+    }
+
+    /**
      * Parses tags from an AI message, updates persisted tracker fields,
      * rebuilds the header, and re-injects the prompt with the updated state.
      *
@@ -285,8 +370,26 @@
 
         var tags = parseTags(text);
 
+        // If current message is missing some tags, check the previous AI message for context.
+        if (tags.time === null || tags.location === null || tags.weather === null || tags.heart === null) {
+            var ctx = PT.getContext();
+            if (ctx && ctx.recentMessages) {
+                var msgs = ctx.recentMessages;
+                for (var i = msgs.length - 1; i >= 0; i--) {
+                    if (!msgs[i].isUser && msgs[i].index !== messageIndex) {
+                        var prevTags = parseTags(msgs[i].text);
+                        if (tags.time     === null && prevTags.time     !== null) { tags.time     = prevTags.time; }
+                        if (tags.location === null && prevTags.location !== null) { tags.location = prevTags.location; }
+                        if (tags.weather  === null && prevTags.weather  !== null) { tags.weather  = prevTags.weather; }
+                        if (tags.heart    === null && prevTags.heart    !== null) { tags.heart    = prevTags.heart; }
+                        break;
+                    }
+                }
+            }
+        }
+
         // Update persisted tracker fields from parsed tags.
-        if (tags.time !== null)     { s.currentTime     = tags.time; }
+        if (tags.time !== null)     { s.currentTime     = convertTo12Hour(tags.time); }
         if (tags.location !== null) { s.currentLocation = tags.location; }
         if (tags.weather !== null)  { s.currentWeather  = tags.weather; }
 
@@ -358,14 +461,104 @@
     function onChatChanged() {
         PT.log('[PTTracker] CHAT_CHANGED — clearing all headers.');
         PT.clearAllHeaders();
+        scanRecentMessages();
         injectPrompt();
     }
 
     /** Fired when the active character changes. */
     function onCharacterChanged() {
         PT.log('[PTTracker] CHARACTER_CHANGED — re-registering buttons.');
+        var s = getSettings();
+        // Reset heart points to 0, then check character metadata for an override.
+        var ctx = PT.getContext();
+        s.heartPoints = getCharacterHeartDefault(ctx && ctx.character);
+        PT.saveSettings();
         registerDefaultButtons();
+        scanRecentMessages();
         injectPrompt();
+    }
+
+    /**
+     * Fired when a quick-reply button with an `action` field is clicked.
+     * data = { action: string }
+     */
+    function onButtonClicked(data) {
+        PT.log('[PTTracker] BUTTON_CLICKED action=' + data.action);
+        var s = getSettings();
+
+        if (data.action === 'edit_tracker') {
+            PT.showEditDialog('Edit Tracker', [
+                { key: 'time',     label: 'Time',         value: s.currentTime     || '' },
+                { key: 'location', label: 'Location',     value: s.currentLocation || '' },
+                { key: 'weather',  label: 'Weather',      value: s.currentWeather  || '' },
+                { key: 'heart',    label: 'Heart Points', value: String(s.heartPoints) },
+            ]).then(function (result) {
+                if (!result) return; // user cancelled
+                if (result.time     !== undefined) { s.currentTime     = result.time; }
+                if (result.location !== undefined) { s.currentLocation = result.location; }
+                if (result.weather  !== undefined) { s.currentWeather  = result.weather; }
+                if (result.heart    !== undefined) {
+                    var pts = parseInt(result.heart, 10);
+                    if (!isNaN(pts)) { s.heartPoints = Math.max(0, pts); }
+                }
+                PT.saveSettings();
+                // Rebuild header for the most recent AI message.
+                var ctx = PT.getContext();
+                if (ctx && ctx.recentMessages) {
+                    var msgs = ctx.recentMessages;
+                    for (var i = msgs.length - 1; i >= 0; i--) {
+                        if (!msgs[i].isUser) {
+                            var tags = parseTags(msgs[i].text);
+                            PT.setMessageHeader(msgs[i].index, buildHeader(tags, s));
+                            break;
+                        }
+                    }
+                }
+                injectPrompt();
+                PT.log('[PTTracker] Tracker updated via Edit dialog.');
+            });
+
+        } else if (data.action === 'regenerate_tracker') {
+            var prompt =
+                '[OOC: Please re-assess the current scene and re-output ONLY the four tracker tags. ' +
+                'Output exactly these tags and nothing else:\n' +
+                '[time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]\n' +
+                '[location: Full Location Description]\n' +
+                '[weather: Weather Description, Temperature]\n' +
+                '[heart: points_value]]';
+            PT.generateHidden(prompt).then(function (response) {
+                if (!response) return;
+                var tags = parseTags(response);
+                var updated = false;
+                if (tags.time     !== null) { s.currentTime     = convertTo12Hour(tags.time); updated = true; }
+                if (tags.location !== null) { s.currentLocation = tags.location;              updated = true; }
+                if (tags.weather  !== null) { s.currentWeather  = tags.weather;               updated = true; }
+                if (tags.heart !== null) {
+                    var pts = parseInt(tags.heart, 10);
+                    if (!isNaN(pts)) { s.heartPoints = Math.max(0, pts); updated = true; }
+                }
+                if (!updated) return;
+                PT.saveSettings();
+                // Update the header of the most recent AI message with the new tags.
+                var ctx = PT.getContext();
+                if (ctx && ctx.recentMessages) {
+                    var msgs = ctx.recentMessages;
+                    for (var i = msgs.length - 1; i >= 0; i--) {
+                        if (!msgs[i].isUser) {
+                            var msgTags = parseTags(msgs[i].text);
+                            // Merge regenerated tags into message tags.
+                            if (tags.time     !== null) { msgTags.time     = s.currentTime; }
+                            if (tags.location !== null) { msgTags.location = s.currentLocation; }
+                            if (tags.weather  !== null) { msgTags.weather  = s.currentWeather; }
+                            PT.setMessageHeader(msgs[i].index, buildHeader(msgTags, s));
+                            break;
+                        }
+                    }
+                }
+                injectPrompt();
+                PT.log('[PTTracker] Tracker regenerated via hidden generation.');
+            });
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -379,13 +572,19 @@
         PT.log('[PTTracker] Initialising…');
 
         // Ensure settings exist with sensible defaults.
-        getSettings();
+        var s = getSettings();
+        // Reset heart points to 0, then check character metadata for an override.
+        var ctx = PT.getContext();
+        s.heartPoints = getCharacterHeartDefault(ctx && ctx.character);
         PT.saveSettings();
 
         // Register the output filter so PocketTavern's Kotlin side strips tracker
         // tags from displayed message bubbles AFTER this extension has parsed them.
         PT.registerOutputFilter(EXT_ID, OUTPUT_FILTER_PATTERN);
         PT.log('[PTTracker] Output filter registered.');
+
+        // Scan recent messages for existing tracker data.
+        scanRecentMessages();
 
         // Inject the tracker system prompt.
         injectPrompt();
@@ -401,6 +600,7 @@
         PT.eventSource.on(PT.events.GENERATION_STOPPED, onGenerationStopped);
         PT.eventSource.on(PT.events.CHAT_CHANGED,       onChatChanged);
         PT.eventSource.on(PT.events.CHARACTER_CHANGED,  onCharacterChanged);
+        PT.eventSource.on(PT.events.BUTTON_CLICKED,     onButtonClicked);
 
         PT.log('[PTTracker] Ready.');
     }
