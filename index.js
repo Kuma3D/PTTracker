@@ -245,7 +245,7 @@
 
         if (chars.length === 0) return '';
 
-        var lines = ['Characters Present:'];
+        var lines = ['Tracker', '', 'Characters Present:'];
         for (var i = 0; i < chars.length; i++) {
             var c = chars[i];
             lines.push('');
@@ -307,7 +307,7 @@
             '[heart: points_value]\n' +
             '[char: CharacterName | outfit: What they wear | state: Emotional/physical state | position: Where in the scene]\n' +
             '\n' +
-            'Add one [char: ...] line for EACH character currently present in the scene.\n' +
+            'Add one [char: ...] line for EVERY person present in the scene, INCLUDING {{user}}.\n' +
             '\n' +
             'Heart Meter Rules:\n' +
             'Assess the relationship and assign heart points showing the romantic interest the character has for {{user}}. ' +
@@ -332,6 +332,7 @@
             '[location: Mako Crystal Cave, Eastern Trail, Mount Nibel]\n' +
             '[weather: Cool and damp, sunny outside, 57\u00B0F]\n' +
             '[heart: 5000]\n' +
+            '[char: {{user}} | outfit: Casual hoodie | state: Relaxed | position: Standing by the fountain]\n' +
             '[char: Alice | outfit: Blue dress | state: Happy | position: Near the fountain]\n' +
             '[char: Bob | outfit: Casual jeans | state: Nervous | position: On the bench]'
         );
@@ -642,13 +643,14 @@
                 '- Where the characters are currently located in the scene\n' +
                 '- What the weather and environment are like\n' +
                 '- How the character feels about {{user}} based on their interactions (heart points 0-69999)\n' +
-                '- Which characters are present and their current outfit, state, and position\n\n' +
+                '- Which characters are present (INCLUDING {{user}}) and their current outfit, state, and position\n\n' +
                 'Output ONLY the tracker tags and nothing else:\n' +
                 '[time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]\n' +
                 '[location: Full Location Description]\n' +
                 '[weather: Weather Description, Temperature]\n' +
                 '[heart: points_value]\n' +
-                '[char: Name | outfit: What they wear | state: State | position: Position]';
+                '[char: Name | outfit: What they wear | state: State | position: Position]\n' +
+                'Include a [char:] tag for {{user}} as well as every other person in the scene.';
 
             PT.generateHidden(prompt).then(function (response) {
                 if (!response) return;
