@@ -192,21 +192,18 @@
     }
 
     // -------------------------------------------------------------------------
-    // Header builder
+    // Header builders
     // -------------------------------------------------------------------------
 
     /**
-     * Builds the header string shown above an AI message bubble.
-     *
-     * Always-visible fields: ⏰ Time, 🗺️ Location, 🌤️ Weather, 💘 Heart Meter.
-     * Below a blank separator: 👥 Characters (name list on one line), then one
-     * detail line per character showing outfit, state, and position.
+     * Builds the always-visible part of the message header.
+     * Shows ⏰ Time, 🗺️ Location, 🌤️ Weather, 💘 Heart Meter.
      *
      * @param {{ time, location, weather, heart, characters }} tags
      * @param {object} settings
      * @returns {string}
      */
-    function buildHeader(tags, settings) {
+    function buildMainText(tags, settings) {
         var lines = [];
 
         if (settings.showTime) {
@@ -227,26 +224,35 @@
             lines.push('\uD83D\uDC98 Heart Meter: ' + emoji + ' ' + pts.toLocaleString());
         }
 
-        if (settings.showCharacters) {
-            var chars = (tags.characters && tags.characters.length > 0)
-                ? tags.characters
-                : (settings.currentCharacters || []);
+        return lines.join('\n');
+    }
 
-            if (chars.length > 0) {
-                lines.push('');
-                // Single line listing all names
-                var names = chars.map(function (c) { return c.name; }).join(', ');
-                lines.push('\uD83D\uDC65 Characters: ' + names);
-                // One detail line per character
-                for (var i = 0; i < chars.length; i++) {
-                    var c       = chars[i];
-                    var details = [];
-                    if (c.outfit)   details.push(c.outfit);
-                    if (c.state)    details.push(c.state);
-                    if (c.position) details.push(c.position);
-                    lines.push(c.name + (details.length > 0 ? ' \u2014 ' + details.join(' | ') : ''));
-                }
-            }
+    /**
+     * Builds the collapsible (tap-to-expand) section of the message header.
+     * Shows Characters Present with each character's Outfit, State, and Position
+     * on separate labeled lines.
+     *
+     * @param {{ time, location, weather, heart, characters }} tags
+     * @param {object} settings
+     * @returns {string}
+     */
+    function buildCollapsibleText(tags, settings) {
+        if (!settings.showCharacters) return '';
+
+        var chars = (tags.characters && tags.characters.length > 0)
+            ? tags.characters
+            : (settings.currentCharacters || []);
+
+        if (chars.length === 0) return '';
+
+        var lines = ['Characters Present:'];
+        for (var i = 0; i < chars.length; i++) {
+            var c = chars[i];
+            lines.push('');
+            lines.push(c.name);
+            if (c.outfit)   lines.push('  Outfit: '   + c.outfit);
+            if (c.state)    lines.push('  State: '    + c.state);
+            if (c.position) lines.push('  Position: ' + c.position);
         }
 
         return lines.join('\n');
@@ -386,7 +392,7 @@
                 currentCharacters: s.currentCharacters,
             };
 
-            PT.setMessageHeader(aiMsgs[j].index, buildHeader(tags, s), EXT_ID);
+            PT.setMessageHeader(aiMsgs[j].index, buildMainText(tags, s), EXT_ID, buildCollapsibleText(tags, s));
         }
 
         if (anyUpdated) PT.saveSettings();
@@ -446,7 +452,7 @@
             currentCharacters: s.currentCharacters,
         };
 
-        PT.setMessageHeader(messageIndex, buildHeader(tags, s), EXT_ID);
+        PT.setMessageHeader(messageIndex, buildMainText(tags, s), EXT_ID, buildCollapsibleText(tags, s));
         PT.log('[PTTracker] Header set for message #' + messageIndex + '.');
 
         injectPrompt();
@@ -460,10 +466,18 @@
             if (!msgs[i].isUser && msgs[i].index < beforeIndex) {
                 var headers = PT.getMessageHeaders(msgs[i].index);
                 for (var h = 0; h < headers.length; h++) {
-                    if (headers[h].extensionId === EXT_ID) return headers[h].text;
+                    if (headers[h].extensionId === EXT_ID) {
+                        // Combine main text and collapsible text for full regen context.
+                        var combined = headers[h].text || '';
+                        if (headers[h].collapsibleText) combined += '\n' + headers[h].collapsibleText;
+                        return combined;
+                    }
                 }
                 var rawTags = parseTags(msgs[i].text);
-                if (hasTags(rawTags)) return buildHeader(rawTags, getSettings());
+                if (hasTags(rawTags)) {
+                    var s = getSettings();
+                    return buildMainText(rawTags, s) + '\n' + buildCollapsibleText(rawTags, s);
+                }
                 return null;
             }
         }
@@ -574,10 +588,12 @@
                     currentWeather: newWeather, heartPoints: newHeart,
                     currentCharacters: newChars,
                 };
+                var emptyTags = { time: null, location: null, weather: null, heart: null, characters: [] };
                 PT.setMessageHeader(
                     editIdx,
-                    buildHeader({ time: null, location: null, weather: null, heart: null, characters: [] }, tempSettings),
-                    EXT_ID
+                    buildMainText(emptyTags, tempSettings),
+                    EXT_ID,
+                    buildCollapsibleText(emptyTags, tempSettings)
                 );
 
                 // Update global settings if this is the most recent AI message.
@@ -666,10 +682,12 @@
                     currentWeather: newWeather, heartPoints: newHeart,
                     currentCharacters: newChars,
                 };
+                var emptyTags = { time: null, location: null, weather: null, heart: null, characters: [] };
                 PT.setMessageHeader(
                     regenIdx,
-                    buildHeader({ time: null, location: null, weather: null, heart: null, characters: [] }, tempSettings),
-                    EXT_ID
+                    buildMainText(emptyTags, tempSettings),
+                    EXT_ID,
+                    buildCollapsibleText(emptyTags, tempSettings)
                 );
 
                 // Update global settings if this is the most recent AI message.
