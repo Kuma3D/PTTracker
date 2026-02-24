@@ -399,12 +399,113 @@
         if (anyUpdated) PT.saveSettings();
     }
 
+    function autoGenerateTracker(messageIndex) {
+        var s = getSettings();
+
+        // Get the actual message text to analyze
+        var messageText = '';
+        var ctx = PT.getContext();
+        if (ctx && ctx.recentMessages) {
+            for (var i = ctx.recentMessages.length - 1; i >= 0; i--) {
+                if (ctx.recentMessages[i].index === messageIndex) {
+                    messageText = ctx.recentMessages[i].text;
+                    break;
+                }
+            }
+        }
+        if (!messageText) return;
+
+        var prevHeaderText = getPreviousTrackerHeader(messageIndex);
+
+        var prompt =
+            '[OOC: Do NOT continue the story. Do NOT write any narrative. ' +
+            'Analyze the following message and extract scene information from it.\n\n' +
+            'Message to analyze:\n' +
+            '"""' + messageText + '"""\n\n';
+
+        if (prevHeaderText) {
+            prompt +=
+                'Previous tracker state for reference:\n' +
+                prevHeaderText + '\n\n' +
+                'Carry forward any values that the message above does not change.\n\n';
+        }
+
+        prompt +=
+            'Based on what is described in the message above, output ONLY these tracker tags:\n' +
+            '[time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]\n' +
+            '[location: Full Location Description]\n' +
+            '[weather: Weather Description, Temperature]\n' +
+            '[heart: points_value]\n' +
+            '[char: Name | outfit: What they wear | state: State | position: Position]\n\n' +
+            'Include a [char:] tag for every person present in the scene, including {{user}}.\n' +
+            'Output ONLY the tags. No other text.';
+
+        PT.generateHidden(prompt).then(function (response) {
+            if (!response) return;
+            var tags = parseTags(response);
+            if (!hasTags(tags)) {
+                PT.log('[PTTracker] Auto-generate returned no valid tags for message #' + messageIndex + '.');
+                return;
+            }
+
+            var newTime     = tags.time     !== null ? convertTo12Hour(tags.time) : (s.currentTime     || 'Unknown');
+            var newLocation = tags.location !== null ? tags.location              : (s.currentLocation || 'Unknown');
+            var newWeather  = tags.weather  !== null ? tags.weather               : (s.currentWeather  || 'Unknown');
+            var newHeart    = s.heartPoints;
+            var newChars    = tags.characters.length > 0 ? tags.characters : (s.currentCharacters || []);
+
+            if (tags.heart !== null) {
+                var pts = parseInt(tags.heart, 10);
+                if (!isNaN(pts)) newHeart = Math.max(0, pts);
+            }
+
+            s.currentTime       = newTime;
+            s.currentLocation   = newLocation;
+            s.currentWeather    = newWeather;
+            s.heartPoints       = newHeart;
+            s.currentCharacters = newChars;
+            PT.saveSettings();
+
+            _perMessageTracker[messageIndex] = {
+                currentTime:       newTime,
+                currentLocation:   newLocation,
+                currentWeather:    newWeather,
+                heartPoints:       newHeart,
+                currentCharacters: newChars,
+            };
+
+            var tempSettings = {
+                showTime: s.showTime, showLocation: s.showLocation,
+                showWeather: s.showWeather, showHeartMeter: s.showHeartMeter,
+                showCharacters: s.showCharacters,
+                currentTime: newTime, currentLocation: newLocation,
+                currentWeather: newWeather, heartPoints: newHeart,
+                currentCharacters: newChars,
+            };
+            var emptyTags = { time: null, location: null, weather: null, heart: null, characters: [] };
+            PT.setMessageHeader(
+                messageIndex,
+                buildMainText(emptyTags, tempSettings),
+                EXT_ID,
+                buildCollapsibleText(emptyTags, tempSettings)
+            );
+
+            injectPrompt();
+            PT.log('[PTTracker] Auto-generated tracker for message #' + messageIndex + '.');
+        });
+    }
+
     function processAiMessage(text, messageIndex) {
         var s = getSettings();
         if (!s.enabled) return;
 
         var tags = parseTags(text);
-        if (!hasTags(tags)) return;
+        if (!hasTags(tags)) {
+            // No tracker tags in the AI response — auto-generate them via hidden prompt
+            PT.log('[PTTracker] No tags in message #' + messageIndex + ' — auto-generating tracker.');
+            autoGenerateTracker(messageIndex);
+            return;
+        }
 
         // Fill any missing tags from the previous AI message for continuity.
         var needsFill = tags.time === null || tags.location === null ||
@@ -520,6 +621,13 @@
         PT.log('[PTTracker] CHAT_CHANGED — clearing all headers.');
         PT.clearAllHeaders();
         _perMessageTracker = {};
+        // Reset tracker state so old chat data doesn't bleed into the new chat
+        var s = getSettings();
+        s.currentTime = '';
+        s.currentLocation = '';
+        s.currentWeather = '';
+        s.currentCharacters = [];
+        s.heartPoints = s.defaultHeartPoints || 0;
         scanRecentMessages();
         injectPrompt();
     }
@@ -527,12 +635,18 @@
     function onCharacterChanged() {
         PT.log('[PTTracker] CHARACTER_CHANGED.');
         var s   = getSettings();
+        // Reset tracker state so old character data doesn't bleed over
+        s.currentTime = '';
+        s.currentLocation = '';
+        s.currentWeather = '';
+        s.currentCharacters = [];
+        s.heartPoints = s.defaultHeartPoints || 0;
         var ctx = PT.getContext();
         var charDefault = getCharacterHeartDefault(ctx && ctx.character);
-        if (s.heartPoints === 0 && charDefault > 0) {
+        if (charDefault > 0) {
             s.heartPoints = charDefault;
-            PT.saveSettings();
         }
+        PT.saveSettings();
         _perMessageTracker = {};
         scanRecentMessages();
         injectPrompt();
@@ -624,33 +738,40 @@
             var regenIdx       = parseInt(action.substring('regenerate_message_'.length), 10);
             var prevHeaderText = getPreviousTrackerHeader(regenIdx);
 
+            // Get the actual message text to analyze
+            var regenText = '';
+            var regenCtx = PT.getContext();
+            if (regenCtx && regenCtx.recentMessages) {
+                for (var ri = regenCtx.recentMessages.length - 1; ri >= 0; ri--) {
+                    if (regenCtx.recentMessages[ri].index === regenIdx) {
+                        regenText = regenCtx.recentMessages[ri].text;
+                        break;
+                    }
+                }
+            }
+
             var prompt =
-                '[OOC: Based ONLY on the conversation history and what has happened in the story, ' +
-                'determine what the tracker values should be for this point in the narrative. ' +
-                'Do NOT copy values — derive everything fresh from the scene context.\n\n';
+                '[OOC: Do NOT continue the story. Do NOT write any narrative. ' +
+                'Analyze the following message and extract scene information from it.\n\n' +
+                'Message to analyze:\n' +
+                '"""' + regenText + '"""\n\n';
 
             if (prevHeaderText) {
                 prompt +=
-                    'The PREVIOUS message\'s tracker state was:\n' +
+                    'Previous tracker state for reference:\n' +
                     prevHeaderText + '\n\n' +
-                    'Use this only as a reference point for continuity. ' +
-                    'Values should reflect what has changed since then based on the story.\n\n';
+                    'Carry forward any values that the message above does not change.\n\n';
             }
 
             prompt +=
-                'Consider:\n' +
-                '- What time of day and date it should be based on story progression\n' +
-                '- Where the characters are currently located in the scene\n' +
-                '- What the weather and environment are like\n' +
-                '- How the character feels about {{user}} based on their interactions (heart points 0-69999)\n' +
-                '- Which characters are present (INCLUDING {{user}}) and their current outfit, state, and position\n\n' +
-                'Output ONLY the tracker tags and nothing else:\n' +
+                'Based on what is described in the message above, output ONLY these tracker tags:\n' +
                 '[time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)]\n' +
                 '[location: Full Location Description]\n' +
                 '[weather: Weather Description, Temperature]\n' +
                 '[heart: points_value]\n' +
-                '[char: Name | outfit: What they wear | state: State | position: Position]\n' +
-                'Include a [char:] tag for {{user}} as well as every other person in the scene.';
+                '[char: Name | outfit: What they wear | state: State | position: Position]\n\n' +
+                'Include a [char:] tag for every person present in the scene, including {{user}}.\n' +
+                'Output ONLY the tags. No other text.';
 
             PT.generateHidden(prompt).then(function (response) {
                 if (!response) return;
